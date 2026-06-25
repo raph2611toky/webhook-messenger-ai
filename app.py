@@ -578,6 +578,7 @@ def process_webhook_event(data):
     try:
         entries = data.get("entry", [])
         app.logger.info(f"Traitement webhook démarré | entries={len(entries)}")
+        app.logger.info(f"data : {data}")
 
         for entry in entries:
             messaging_events = entry.get("messaging", [])
