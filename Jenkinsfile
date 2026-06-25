@@ -30,24 +30,12 @@ pipeline {
         }
 
         stage('Build Webhookmessenger Docker Image') {
-            when {
-                anyOf {
-                    branch 'webhookmessenger'
-                    branch 'rebuild'
-                }
-            }
             steps {
                 sh "docker build -t ${BACKEND_DOCKER_IMAGE}:${DOCKER_TAG} -f webhookmessenger/Dockerfile ."
             }
         }
 
         stage('Deploy Webhookmessenger') {
-            when {
-                anyOf {
-                    branch 'webhookmessenger'
-                    branch 'rebuild'
-                }
-            }
             steps {
                 script {
                     sh "docker network create ${APP_NETWORK} || true"
