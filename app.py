@@ -8,6 +8,7 @@ from logging.handlers import RotatingFileHandler
 import os
 import sys
 import time
+import re
 import uuid
 import logging
 import requests
@@ -68,7 +69,6 @@ root_logger.setLevel(LOG_LEVEL_VALUE)
 root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
 
-# Harmoniser aussi les logs Gunicorn / Werkzeug
 for logger_name in ["gunicorn.error", "gunicorn.access", "werkzeug"]:
     ext_logger = logging.getLogger(logger_name)
     ext_logger.handlers = root_logger.handlers
@@ -111,7 +111,6 @@ def log_request():
 def log_response(response):
     start_time = getattr(request, "start_time", time.time())
     request_id = getattr(request, "request_id", "unknown")
-
     duration_ms = round((time.time() - start_time) * 1000, 2)
 
     app.logger.info(
@@ -142,12 +141,20 @@ def log_exception(error):
 # ============================================================
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v25.0")
 
+client = None
+
 if not GEMINI_API_KEY:
     app.logger.error("GEMINI_API_KEY manquant dans les variables d'environnement.")
+else:
+    client = OpenAI(
+        api_key=GEMINI_API_KEY,
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+    )
 
 if not VERIFY_TOKEN:
     app.logger.error("VERIFY_TOKEN manquant dans les variables d'environnement.")
@@ -155,37 +162,40 @@ if not VERIFY_TOKEN:
 if not PAGE_ACCESS_TOKEN:
     app.logger.error("PAGE_ACCESS_TOKEN manquant dans les variables d'environnement.")
 
-client = OpenAI(
-    api_key=GEMINI_API_KEY,
-    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-)
-
 
 # ============================================================
 # PROMPTS IA
 # ============================================================
 
+STYLE_MESSENGER = (
+    "Réponds dans un style clair pour Messenger. "
+    "Utilise des phrases courtes, des titres avec emojis, des listes avec puces et des sections aérées. "
+    "N'utilise pas de Markdown complexe, pas de tableaux lourds et pas de longs blocs de code. "
+    "Structure la réponse avec : résumé court, conseils pratiques, signes d'alerte, et orientation vers un CSB ou hôpital si nécessaire. "
+    "Ne donne pas de diagnostic définitif. Rappelle que tu ne remplaces pas un professionnel de santé."
+)
+
 CHAT_CONTENT = {
     "FR": (
         "Tu es un assistant exceptionnel appelé Sexual AI, spécialisé dans la santé sexuelle. "
-        "Tu es basé à Madagascar et tu connais toutes les provinces, régions, districts et villes du pays. "
-        "Tu fournis des informations claires, éducatives et responsables sur la santé sexuelle : causes, "
-        "symptômes, prévention, options de traitement et conseils pratiques. "
-        "Tu ne remplaces pas un médecin. Quand il y a douleur forte, saignement, fièvre, grossesse, infection suspectée, "
-        "violence sexuelle, rapport non protégé récent, ou situation urgente, tu recommandes de contacter rapidement "
-        "un médecin, un hôpital ou le CSB le plus proche."
+        "Tu es basé à Madagascar et tu connais les provinces, régions, districts et villes du pays. "
+        "Tu fournis des informations claires, éducatives et responsables sur la santé sexuelle : causes, symptômes, prévention, options de traitement et conseils pratiques. "
+        "Quand il y a douleur forte, saignement, fièvre, grossesse, infection suspectée, violence sexuelle, rapport non protégé récent, ou situation urgente, "
+        "tu recommandes de contacter rapidement un médecin, un hôpital ou le CSB le plus proche. "
+        + STYLE_MESSENGER
     ),
     "EN": (
         "You are an exceptional assistant called Sexual AI, specialized in sexual health. "
         "You are based in Madagascar and know the provinces, regions, districts, and cities of the country. "
         "You provide clear, educational, and responsible sexual health information. "
-        "You do not replace a doctor. For urgent or risky symptoms, advise the user to contact a doctor, "
-        "hospital, or nearest CSB."
+        "For urgent or risky symptoms, advise the user to contact a doctor, hospital, or nearest CSB. "
+        + STYLE_MESSENGER
     ),
     "MG": (
         "Ianao dia mpanampy antsoina hoe Sexual AI, manampahaizana amin'ny fahasalamana ara-pananahana. "
-        "Manome fampahalalana mazava sy tompon'andraikitra ianao, ary manoro hevitra ny olona hijery dokotera "
-        "na CSB akaiky raha misy soritr'aretina mampiahiahy na maika."
+        "Manome fampahalalana mazava sy tompon'andraikitra ianao. "
+        "Raha misy soritr'aretina mampiahiahy na maika dia torohevitrao ny hijery dokotera, hopitaly na CSB akaiky. "
+        + STYLE_MESSENGER
     )
 }
 
@@ -197,10 +207,64 @@ CHAT_CONTENT = {
 def mask_id(value: str) -> str:
     if not value:
         return "unknown"
+
     value = str(value)
+
     if len(value) <= 4:
         return "****"
+
     return f"***{value[-4:]}"
+
+
+def format_markdown_for_messenger(text: str) -> str:
+    """
+    Messenger ne rend pas vraiment le Markdown.
+    Cette fonction transforme le Markdown en texte propre et lisible.
+    """
+
+    if not text:
+        return ""
+
+    formatted = text.strip()
+
+    # Liens Markdown : [texte](url) => texte: url
+    formatted = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1: \2", formatted)
+
+    # Titres Markdown
+    formatted = re.sub(r"^###\s+(.+)$", r"🔹 \1", formatted, flags=re.MULTILINE)
+    formatted = re.sub(r"^##\s+(.+)$", r"🔷 \1", formatted, flags=re.MULTILINE)
+    formatted = re.sub(r"^#\s+(.+)$", r"📌 \1", formatted, flags=re.MULTILINE)
+
+    # Gras / italique
+    formatted = re.sub(r"\*\*(.*?)\*\*", r"\1", formatted)
+    formatted = re.sub(r"__(.*?)__", r"\1", formatted)
+    formatted = re.sub(r"\*(.*?)\*", r"\1", formatted)
+    formatted = re.sub(r"_(.*?)_", r"\1", formatted)
+
+    # Code inline
+    formatted = re.sub(r"`([^`]+)`", r"\1", formatted)
+
+    # Blocs de code
+    formatted = re.sub(
+        r"```[\s\S]*?```",
+        lambda m: m.group(0).replace("```", "").strip(),
+        formatted
+    )
+
+    # Listes Markdown
+    formatted = re.sub(r"^\s*[-*+]\s+", "• ", formatted, flags=re.MULTILINE)
+
+    # Listes numérotées
+    formatted = re.sub(r"^\s*(\d+)\.\s+", r"\1. ", formatted, flags=re.MULTILINE)
+
+    # Tableaux Markdown simples
+    formatted = re.sub(r"^\s*\|?\s*-{3,}.*$", "", formatted, flags=re.MULTILINE)
+    formatted = formatted.replace("|", " | ")
+
+    # Espaces
+    formatted = re.sub(r"\n{3,}", "\n\n", formatted)
+
+    return formatted.strip()
 
 
 def traduire_texte(texte, source_lang="fr", cible_lang="mg"):
@@ -234,7 +298,7 @@ def detect_lang(text: str) -> str:
     mots_mg = [
         "aho", "ianao", "manao", "inona", "firy", "marary",
         "fahasalamana", "aretina", "misaotra", "azafady",
-        "ve", "tsy", "eny", "tsia"
+        "ve", "tsy", "eny", "tsia", "mila", "afaka", "misy"
     ]
 
     if any(mot in text_lower.split() for mot in mots_mg):
@@ -267,6 +331,66 @@ def split_text(text, max_len=1900):
     return chunks
 
 
+def build_main_quick_replies():
+    return [
+        {
+            "content_type": "text",
+            "title": "Prévention IST",
+            "payload": "PREVENTION_IST"
+        },
+        {
+            "content_type": "text",
+            "title": "Symptômes",
+            "payload": "SYMPTOMES"
+        },
+        {
+            "content_type": "text",
+            "title": "Contraception",
+            "payload": "CONTRACEPTION"
+        },
+        {
+            "content_type": "text",
+            "title": "Urgence",
+            "payload": "URGENCE"
+        }
+    ]
+
+
+def map_payload_to_question(payload: str) -> str:
+    payload = (payload or "").upper()
+
+    mapping = {
+        "PREVENTION_IST": "Donne-moi des conseils simples pour prévenir les infections sexuellement transmissibles.",
+        "SYMPTOMES": "Quels sont les symptômes fréquents des infections sexuellement transmissibles ?",
+        "CONTRACEPTION": "Explique clairement les méthodes de contraception disponibles.",
+        "URGENCE": "Quels sont les signes d'urgence en santé sexuelle et que faut-il faire rapidement ?",
+        "MENU": "menu"
+    }
+
+    return mapping.get(payload, payload)
+
+
+def is_menu_message(text: str) -> bool:
+    if not text:
+        return False
+
+    text_lower = text.lower().strip()
+
+    menu_words = [
+        "menu",
+        "start",
+        "commencer",
+        "bonjour",
+        "salut",
+        "hello",
+        "hi",
+        "manomboka",
+        "slt"
+    ]
+
+    return text_lower in menu_words
+
+
 # ============================================================
 # IA
 # ============================================================
@@ -275,6 +399,10 @@ def simple_chat(message: str, lang="FR") -> str:
     if not message:
         app.logger.info("Message vide reçu dans simple_chat.")
         return "Message requis."
+
+    if client is None:
+        app.logger.error("Client IA non initialisé: GEMINI_API_KEY manquant.")
+        return "Désolé, le service IA n'est pas encore configuré."
 
     lang = lang.upper()
     original_lang = lang
@@ -298,10 +426,10 @@ def simple_chat(message: str, lang="FR") -> str:
         system_prompt = CHAT_CONTENT["FR"]
 
     try:
-        app.logger.debug("Appel Gemini démarré.")
+        app.logger.debug(f"Appel Gemini démarré | model={GEMINI_MODEL}")
 
         response = client.chat.completions.create(
-            model="gemini-2.5-flash",
+            model=GEMINI_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": message_for_ai}
@@ -309,11 +437,13 @@ def simple_chat(message: str, lang="FR") -> str:
             temperature=0.5
         )
 
-        reponse_chat = response.choices[0].message.content
+        reponse_chat = response.choices[0].message.content or ""
 
         if original_lang == "MG":
             app.logger.info("Traduction FR -> MG après réponse IA.")
             reponse_chat = traduire_texte(reponse_chat, source_lang="fr", cible_lang="mg")
+
+        reponse_chat = format_markdown_for_messenger(reponse_chat)
 
         app.logger.info(
             f"Génération IA réussie | lang={original_lang} | response_length={len(reponse_chat)}"
@@ -339,9 +469,12 @@ def simple_chat(message: str, lang="FR") -> str:
 @app.route("/", methods=["GET"])
 def home():
     app.logger.info("Health check appelé.")
+
     return {
         "status": "ok",
-        "service": "Sexual AI Messenger Webhook"
+        "service": "Sexual AI Messenger Webhook",
+        "log_level": LOG_LEVEL,
+        "model": GEMINI_MODEL
     }
 
 
@@ -443,6 +576,30 @@ def handle_messenger_event(event):
 
     sender_masked = mask_id(sender_id)
 
+    # ------------------------------------------------------------
+    # Gestion des postbacks
+    # ------------------------------------------------------------
+
+    postback = event.get("postback")
+
+    if postback:
+        payload = postback.get("payload", "")
+        app.logger.info(
+            f"Postback reçu | sender={sender_masked} | payload={payload}"
+        )
+
+        if payload.upper() in ["GET_STARTED", "MENU"]:
+            send_main_menu(sender_id)
+            return
+
+        user_text = map_payload_to_question(payload)
+        process_user_question(sender_id, sender_masked, user_text)
+        return
+
+    # ------------------------------------------------------------
+    # Gestion des messages
+    # ------------------------------------------------------------
+
     message_data = event.get("message")
 
     if not message_data:
@@ -457,6 +614,23 @@ def handle_messenger_event(event):
         )
         return
 
+    quick_reply = message_data.get("quick_reply")
+
+    if quick_reply:
+        payload = quick_reply.get("payload", "")
+        app.logger.info(
+            f"Quick reply reçue | sender={sender_masked} | payload={payload}"
+        )
+
+        user_text = map_payload_to_question(payload)
+
+        if user_text == "menu":
+            send_main_menu(sender_id)
+            return
+
+        process_user_question(sender_id, sender_masked, user_text)
+        return
+
     user_text = message_data.get("text")
 
     if not user_text:
@@ -466,10 +640,18 @@ def handle_messenger_event(event):
 
         send_messenger_message(
             sender_id,
-            "Désolé, je peux répondre aux messages texte pour le moment."
+            "Désolé, je peux répondre aux messages texte pour le moment.\n\nTape menu pour voir les options disponibles."
         )
         return
 
+    if is_menu_message(user_text):
+        send_main_menu(sender_id)
+        return
+
+    process_user_question(sender_id, sender_masked, user_text)
+
+
+def process_user_question(sender_id, sender_masked, user_text):
     app.logger.info(
         f"Message texte reçu | sender={sender_masked} | message_length={len(user_text)}"
     )
@@ -480,6 +662,8 @@ def handle_messenger_event(event):
 
     lang = detect_lang(user_text)
     ai_reply = simple_chat(user_text, lang)
+
+    ai_reply = format_markdown_for_messenger(ai_reply)
 
     if len(ai_reply) > 1900:
         chunks = split_text(ai_reply, 1900)
@@ -493,9 +677,39 @@ def handle_messenger_event(event):
                 f"Envoi chunk Messenger | sender={sender_masked} | chunk={index}/{len(chunks)}"
             )
             send_messenger_message(sender_id, chunk)
+
+        send_messenger_quick_replies(
+            sender_id,
+            "Tu veux continuer sur un autre sujet ?",
+            build_main_quick_replies()
+        )
     else:
         send_messenger_message(sender_id, ai_reply)
 
+        send_messenger_quick_replies(
+            sender_id,
+            "Tu veux poser une autre question ou choisir un sujet ?",
+            build_main_quick_replies()
+        )
+
+
+def send_main_menu(recipient_id):
+    text = (
+        "👋 Bonjour, je suis Sexual AI.\n\n"
+        "Je peux t'aider avec des informations simples et responsables sur la santé sexuelle.\n\n"
+        "Choisis un sujet ci-dessous :"
+    )
+
+    send_messenger_quick_replies(
+        recipient_id,
+        text,
+        build_main_quick_replies()
+    )
+
+
+# ============================================================
+# ENVOI MESSENGER
+# ============================================================
 
 def send_messenger_message(recipient_id, text):
     if not PAGE_ACCESS_TOKEN:
@@ -503,8 +717,9 @@ def send_messenger_message(recipient_id, text):
         return
 
     recipient_masked = mask_id(recipient_id)
-
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/me/messages"
+
+    text = format_markdown_for_messenger(text)
 
     payload = {
         "recipient": {
@@ -549,6 +764,64 @@ def send_messenger_message(recipient_id, text):
     except Exception as e:
         app.logger.exception(
             f"Erreur send_messenger_message | recipient={recipient_masked} | erreur={str(e)}"
+        )
+
+
+def send_messenger_quick_replies(recipient_id, text, quick_replies):
+    if not PAGE_ACCESS_TOKEN:
+        app.logger.error("PAGE_ACCESS_TOKEN manquant. Impossible d'envoyer les quick replies.")
+        return
+
+    recipient_masked = mask_id(recipient_id)
+    url = f"https://graph.facebook.com/{GRAPH_VERSION}/me/messages"
+
+    text = format_markdown_for_messenger(text)
+
+    payload = {
+        "recipient": {
+            "id": recipient_id
+        },
+        "message": {
+            "text": text,
+            "quick_replies": quick_replies
+        }
+    }
+
+    params = {
+        "access_token": PAGE_ACCESS_TOKEN
+    }
+
+    try:
+        app.logger.info(
+            f"Envoi Quick Replies démarré | recipient={recipient_masked} | "
+            f"quick_replies={len(quick_replies)}"
+        )
+
+        app.logger.debug(
+            f"Quick Replies DEBUG | recipient={recipient_masked} | quick_replies={quick_replies}"
+        )
+
+        response = requests.post(
+            url,
+            json=payload,
+            params=params,
+            timeout=15
+        )
+
+        if response.status_code >= 400:
+            app.logger.error(
+                f"Erreur Quick Replies API | recipient={recipient_masked} | "
+                f"status={response.status_code} | response={response.text}"
+            )
+        else:
+            app.logger.info(
+                f"Quick Replies envoyées | recipient={recipient_masked} | "
+                f"status={response.status_code}"
+            )
+
+    except Exception as e:
+        app.logger.exception(
+            f"Erreur send_messenger_quick_replies | recipient={recipient_masked} | erreur={str(e)}"
         )
 
 
