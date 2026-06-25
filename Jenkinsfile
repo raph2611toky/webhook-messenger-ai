@@ -31,7 +31,7 @@ pipeline {
 
         stage('Build Webhookmessenger Docker Image') {
             steps {
-                sh "docker build -t ${BACKEND_DOCKER_IMAGE}:${DOCKER_TAG} -f webhookmessenger/Dockerfile ."
+                sh "docker build -t ${BACKEND_DOCKER_IMAGE}:${DOCKER_TAG} -f Dockerfile ."
             }
         }
 
