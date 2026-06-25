@@ -42,8 +42,7 @@ pipeline {
                     sh "docker stop ${BACKEND_DOCKER_NAME} || true && docker rm ${BACKEND_DOCKER_NAME} || true"
 
                     sh """
-                        docker run -d --name ${BACKEND_DOCKER_NAME} \
-                            --env-file .env.build \
+                        docker run -d --name ${BACKEND_DOCKER_NAME} 
                             --network ${APP_NETWORK} \
                             --add-host=host.docker.internal:host-gateway \
                             -p 0.0.0.0:${BACKEND_PORT}:5487 \
