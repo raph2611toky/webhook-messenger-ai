@@ -227,41 +227,31 @@ def format_markdown_for_messenger(text: str) -> str:
 
     formatted = text.strip()
 
-    # Liens Markdown : [texte](url) => texte: url
     formatted = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1: \2", formatted)
 
-    # Titres Markdown
     formatted = re.sub(r"^###\s+(.+)$", r"🔹 \1", formatted, flags=re.MULTILINE)
     formatted = re.sub(r"^##\s+(.+)$", r"🔷 \1", formatted, flags=re.MULTILINE)
     formatted = re.sub(r"^#\s+(.+)$", r"📌 \1", formatted, flags=re.MULTILINE)
 
-    # Gras / italique
     formatted = re.sub(r"\*\*(.*?)\*\*", r"\1", formatted)
     formatted = re.sub(r"__(.*?)__", r"\1", formatted)
     formatted = re.sub(r"\*(.*?)\*", r"\1", formatted)
     formatted = re.sub(r"_(.*?)_", r"\1", formatted)
 
-    # Code inline
     formatted = re.sub(r"`([^`]+)`", r"\1", formatted)
 
-    # Blocs de code
     formatted = re.sub(
         r"```[\s\S]*?```",
         lambda m: m.group(0).replace("```", "").strip(),
         formatted
     )
 
-    # Listes Markdown
     formatted = re.sub(r"^\s*[-*+]\s+", "• ", formatted, flags=re.MULTILINE)
-
-    # Listes numérotées
     formatted = re.sub(r"^\s*(\d+)\.\s+", r"\1. ", formatted, flags=re.MULTILINE)
 
-    # Tableaux Markdown simples
     formatted = re.sub(r"^\s*\|?\s*-{3,}.*$", "", formatted, flags=re.MULTILINE)
     formatted = formatted.replace("|", " | ")
 
-    # Espaces
     formatted = re.sub(r"\n{3,}", "\n\n", formatted)
 
     return formatted.strip()
@@ -293,7 +283,7 @@ def traduire_texte(texte, source_lang="fr", cible_lang="mg"):
 
 
 def detect_lang(text: str) -> str:
-    text_lower = text.lower()
+    text_lower = (text or "").lower()
 
     mots_mg = [
         "aho", "ianao", "manao", "inona", "firy", "marary",
@@ -331,6 +321,10 @@ def split_text(text, max_len=1900):
     return chunks
 
 
+# ============================================================
+# QUICK REPLIES / PAYLOADS
+# ============================================================
+
 def build_main_quick_replies():
     return [
         {
@@ -352,43 +346,78 @@ def build_main_quick_replies():
             "content_type": "text",
             "title": "Urgence",
             "payload": "URGENCE"
+        },
+        {
+            "content_type": "text",
+            "title": "Menu",
+            "payload": "MENU"
         }
     ]
 
 
+def normalize_payload(value: str) -> str:
+    if not value:
+        return ""
+
+    value = value.strip()
+
+    aliases = {
+        "prévention ist": "PREVENTION_IST",
+        "prevention ist": "PREVENTION_IST",
+        "prévention": "PREVENTION_IST",
+        "prevention": "PREVENTION_IST",
+        "ist": "PREVENTION_IST",
+
+        "symptômes": "SYMPTOMES",
+        "symptomes": "SYMPTOMES",
+        "symptôme": "SYMPTOMES",
+        "symptome": "SYMPTOMES",
+
+        "contraception": "CONTRACEPTION",
+
+        "urgence": "URGENCE",
+        "urgent": "URGENCE",
+
+        "menu": "MENU",
+        "start": "MENU",
+        "commencer": "MENU",
+        "bonjour": "MENU",
+        "salut": "MENU",
+        "hello": "MENU",
+        "hi": "MENU",
+        "slt": "MENU",
+        "get_started": "MENU",
+        "get started": "MENU",
+    }
+
+    lower_value = value.lower()
+
+    if lower_value in aliases:
+        return aliases[lower_value]
+
+    return value.upper()
+
+
 def map_payload_to_question(payload: str) -> str:
-    payload = (payload or "").upper()
+    normalized = normalize_payload(payload)
 
     mapping = {
         "PREVENTION_IST": "Donne-moi des conseils simples pour prévenir les infections sexuellement transmissibles.",
         "SYMPTOMES": "Quels sont les symptômes fréquents des infections sexuellement transmissibles ?",
         "CONTRACEPTION": "Explique clairement les méthodes de contraception disponibles.",
         "URGENCE": "Quels sont les signes d'urgence en santé sexuelle et que faut-il faire rapidement ?",
-        "MENU": "menu"
+        "MENU": "menu",
+        "GET_STARTED": "menu",
     }
 
-    return mapping.get(payload, payload)
+    return mapping.get(normalized, payload)
 
 
 def is_menu_message(text: str) -> bool:
     if not text:
         return False
 
-    text_lower = text.lower().strip()
-
-    menu_words = [
-        "menu",
-        "start",
-        "commencer",
-        "bonjour",
-        "salut",
-        "hello",
-        "hi",
-        "manomboka",
-        "slt"
-    ]
-
-    return text_lower in menu_words
+    return normalize_payload(text) == "MENU"
 
 
 # ============================================================
@@ -576,35 +605,42 @@ def handle_messenger_event(event):
 
     sender_masked = mask_id(sender_id)
 
+    app.logger.debug(
+        f"Événement Messenger brut DEBUG | sender={sender_masked} | event={event}"
+    )
+
     # ------------------------------------------------------------
-    # Gestion des postbacks
+    # 1) Postback : Get Started, persistent menu, boutons templates
     # ------------------------------------------------------------
 
     postback = event.get("postback")
 
     if postback:
         payload = postback.get("payload", "")
+        normalized_payload = normalize_payload(payload)
+
         app.logger.info(
-            f"Postback reçu | sender={sender_masked} | payload={payload}"
+            f"Postback reçu | sender={sender_masked} | payload={payload} | normalized={normalized_payload}"
         )
 
-        if payload.upper() in ["GET_STARTED", "MENU"]:
+        user_text = map_payload_to_question(payload)
+
+        if user_text == "menu":
             send_main_menu(sender_id)
             return
 
-        user_text = map_payload_to_question(payload)
         process_user_question(sender_id, sender_masked, user_text)
         return
 
     # ------------------------------------------------------------
-    # Gestion des messages
+    # 2) Message classique ou Quick Reply
     # ------------------------------------------------------------
 
     message_data = event.get("message")
 
     if not message_data:
         app.logger.debug(
-            f"Événement Messenger ignoré: message absent | sender={sender_masked}"
+            f"Événement Messenger ignoré: ni message ni postback | sender={sender_masked}"
         )
         return
 
@@ -618,11 +654,15 @@ def handle_messenger_event(event):
 
     if quick_reply:
         payload = quick_reply.get("payload", "")
+        title_text = message_data.get("text", "")
+        normalized_payload = normalize_payload(payload or title_text)
+
         app.logger.info(
-            f"Quick reply reçue | sender={sender_masked} | payload={payload}"
+            f"Quick reply reçue | sender={sender_masked} | "
+            f"payload={payload} | text={title_text} | normalized={normalized_payload}"
         )
 
-        user_text = map_payload_to_question(payload)
+        user_text = map_payload_to_question(payload or title_text)
 
         if user_text == "menu":
             send_main_menu(sender_id)
@@ -631,7 +671,11 @@ def handle_messenger_event(event):
         process_user_question(sender_id, sender_masked, user_text)
         return
 
-    user_text = message_data.get("text")
+    # ------------------------------------------------------------
+    # 3) Fallback : parfois Messenger envoie seulement le texte du bouton
+    # ------------------------------------------------------------
+
+    user_text = message_data.get("text", "")
 
     if not user_text:
         app.logger.info(
@@ -644,6 +688,22 @@ def handle_messenger_event(event):
         )
         return
 
+    normalized_text = normalize_payload(user_text)
+    mapped_text = map_payload_to_question(user_text)
+
+    app.logger.info(
+        f"Message texte reçu | sender={sender_masked} | "
+        f"text={user_text} | normalized={normalized_text}"
+    )
+
+    if mapped_text == "menu":
+        send_main_menu(sender_id)
+        return
+
+    if normalized_text in ["PREVENTION_IST", "SYMPTOMES", "CONTRACEPTION", "URGENCE"]:
+        process_user_question(sender_id, sender_masked, mapped_text)
+        return
+
     if is_menu_message(user_text):
         send_main_menu(sender_id)
         return
@@ -653,11 +713,11 @@ def handle_messenger_event(event):
 
 def process_user_question(sender_id, sender_masked, user_text):
     app.logger.info(
-        f"Message texte reçu | sender={sender_masked} | message_length={len(user_text)}"
+        f"Traitement question utilisateur | sender={sender_masked} | message_length={len(user_text)}"
     )
 
     app.logger.debug(
-        f"Message Messenger DEBUG | sender={sender_masked} | text={user_text}"
+        f"Question utilisateur DEBUG | sender={sender_masked} | text={user_text}"
     )
 
     lang = detect_lang(user_text)
