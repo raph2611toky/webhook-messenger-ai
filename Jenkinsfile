@@ -42,8 +42,9 @@ pipeline {
                     sh "docker stop ${BACKEND_DOCKER_NAME} || true && docker rm ${BACKEND_DOCKER_NAME} || true"
 
                     sh """
-                        docker run -d --name ${BACKEND_DOCKER_NAME} 
+                        docker run -d --name ${BACKEND_DOCKER_NAME} \
                             --network ${APP_NETWORK} \
+                            --env-file $HOME/secrets/webhookmessenger.env \
                             --add-host=host.docker.internal:host-gateway \
                             -p 0.0.0.0:${BACKEND_PORT}:5487 \
                             ${BACKEND_DOCKER_IMAGE}:${DOCKER_TAG}
